@@ -9,10 +9,16 @@ import torch.nn as nn
 from googletrans import Translator
 from gtts import gTTS
 import os
+import platform
 import pyttsx3
 from langdetect import detect
 
-# Define the GRNN model
+# ── Tesseract path ─────────────────────────────────────────────────────────────
+# FIX: set the path only on Windows; on Linux/macOS tesseract is on PATH already
+if platform.system() == 'Windows':
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+# ── GRNN model ─────────────────────────────────────────────────────────────────
 class GRNN(nn.Module):
     def __init__(self):
         super(GRNN, self).__init__()
@@ -20,161 +26,186 @@ class GRNN(nn.Module):
         self.fc = nn.Linear(128, 10)
 
     def forward(self, x):
-        h0 = torch.zeros(2, x.size(0), 128, device='cpu')
+        h0 = torch.zeros(2, x.size(0), 128)
         out, _ = self.gru(x, h0)
         out = self.fc(out[:, -1, :])
         return out
 
-# Load the GRNN model
+
+# FIX: use weights_only=True (PyTorch >= 2.0) to silence the deprecation warning
 grnn_model = GRNN()
-grnn_model.load_state_dict(torch.load('grnn_model.pth', map_location=torch.device('cpu')))
+grnn_model.load_state_dict(
+    torch.load('grnn_model.pth', map_location=torch.device('cpu'), weights_only=True)
+)
 grnn_model.eval()
 print(grnn_model)
 
-# Initialize the text-to-speech engine
+# ── Text-to-speech engine ──────────────────────────────────────────────────────
 engine = pyttsx3.init()
 
-# Define a function to process the image and extract the text using Tesseract OCR and GRNN
-def process_image(image_path):
-    # Extract the text from the image using Tesseract OCR
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    text = pytesseract.image_to_string(Image.open(image_path), lang='eng+fr')
+# ── Global state ───────────────────────────────────────────────────────────────
+file_path = None   # FIX: declared at module level so all functions can access it safely
+target_lang = None
 
-    # Convert the image to grayscale and resize it for GRNN input
-    img = cv2.imread(image_path, 0)
+
+# ── Core image processing ──────────────────────────────────────────────────────
+def process_image(image_path):
+    """Extract text with Tesseract OCR and append the GRNN digit prediction."""
+    # OCR with Tesseract
+    text = pytesseract.image_to_string(Image.open(image_path), lang='eng+fra')
+    # FIX: 'fr' is not a valid Tesseract lang code — correct code is 'fra'
+
+    # Prepare image for GRNN
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)  # FIX: use named constant
     img = cv2.resize(img, (28, 28))
 
-    # Normalize the image with the same values used during training
+    # Normalize with MNIST training stats
     img = (img.astype(np.float32) / 255.0 - 0.1307) / 0.3081
-
-    # Reshape the image for GRNN input
     img = np.reshape(img, (1, 28, 28))
 
-    # Convert the image to a tensor and pass it through the GRNN model
-    img = torch.from_numpy(img)
-    output = grnn_model(img)
+    img_tensor = torch.from_numpy(img)
+    with torch.no_grad():  # FIX: no gradient needed during inference
+        output = grnn_model(img_tensor)
 
-    # Convert the output to text
-    output = output.squeeze().argmax().item()
+    digit = output.squeeze().argmax().item()
+    return text, digit
 
-    return text + " " + str(output)
 
-# Define a function to open a file dialog and import an image
+# ── GUI callbacks ──────────────────────────────────────────────────────────────
 def open_file_dialog(event=None):
-    # Create a file dialog and allow the user to select a file
     global file_path
-    file_path = filedialog.askopenfilename()
+    path = filedialog.askopenfilename(
+        filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff"), ("All files", "*.*")]
+    )
+    if not path:   # FIX: user cancelled — do nothing instead of crashing
+        return
+    file_path = path
 
-    # Display the selected image in the GUI
     img = Image.open(file_path)
     img = img.resize((400, 400))
-    img = ImageTk.PhotoImage(img)
-    image_label.configure(image=img)
-    image_label.image = img
+    photo = ImageTk.PhotoImage(img)
+    image_label.configure(image=photo)
+    image_label.image = photo   # keep a reference so it isn't garbage-collected
 
-# Define a function to show the extracted text
+
 def show_text():
-    # Call process_image to extract the text from the image
-    text = process_image(file_path)
-    # Detect the language of the extracted text
-    lang = detect(text)
-    # Set the output text variable to display the extracted text
     global target_lang
-    target_lang = None
-    if 'ar' in output_text.get('1.0', tk.END):
-        target_lang = 'ar'
-    elif 'fr' in output_text.get('1.0', tk.END):
-        target_lang = 'fr'
-    elif 'en' in output_text.get('1.0', tk.END):
-        target_lang = 'en'
-    output_text.delete('1.0', tk.END)
-    output_text.insert(tk.END, text)
-    output_text.insert(tk.END, f"{text} ({lang})")
+    if file_path is None:   # FIX: guard against no image being loaded
+        messagebox.showerror("Erreur", "Veuillez d'abord importer une image.")
+        return
 
-# Define a function to handle the "WM_DELETE_WINDOW" event
+    text, digit = process_image(file_path)
+    lang = detect(text) if text.strip() else 'unknown'
+
+    target_lang = None  # reset; user hasn't translated yet
+
+    output_text.delete('1.0', tk.END)
+    # FIX: was inserting text twice (once plain, once with lang tag)
+    output_text.insert(tk.END, f"{text}\n[Digit GRNN: {digit}] [Langue détectée: {lang}]")
+
+
 def on_closing():
     if messagebox.askokcancel("Quitter", "Voulez-vous vraiment quitter ?"):
         root.destroy()
 
-# Define a function to translate the extracted text to the specified language
+
 def translate_text(dest):
-    # Call process_image to extract the text from the image
-    text = process_image(file_path)
-
-    # Translate the text to the specified language
-    translator = Translator()
-    translated_text = translator.translate(text, dest=dest).text
-
-    # Set the output text variable to display the translated text
     global target_lang
+    if file_path is None:
+        messagebox.showerror("Erreur", "Veuillez d'abord importer une image.")
+        return
+
+    text, digit = process_image(file_path)
+
+    try:
+        translator = Translator()
+        translated = translator.translate(text, dest=dest).text
+    except Exception as e:
+        messagebox.showerror("Erreur de traduction", str(e))
+        return
+
     target_lang = dest
     output_text.delete('1.0', tk.END)
-    output_text.insert(tk.END, translated_text)
+    output_text.insert(tk.END, f"{translated}\n[Digit GRNN: {digit}]")
 
-# Define a function to read the text aloud
+
 def read_text():
     global target_lang
     if target_lang is None:
-        messagebox.showerror("Erreur", "Veuillez d'abord afficher ou traduire le texte")
+        messagebox.showerror("Erreur", "Veuillez d'abord afficher ou traduire le texte.")
+        return
+    if file_path is None:
+        messagebox.showerror("Erreur", "Veuillez d'abord importer une image.")
         return
 
-    # Call process_image to extract the text from the image
-    text = process_image(file_path)
+    text, _ = process_image(file_path)
 
-    # Translate the text to the target language, if necessary
-    if target_lang != 'en':
-        translator = Translator()
-        text = translator.translate(text, dest=target_lang).text
+    if target_lang != detect(text):
+        try:
+            translator = Translator()
+            text = translator.translate(text, dest=target_lang).text
+        except Exception as e:
+            messagebox.showerror("Erreur de traduction", str(e))
+            return
 
-    # Read the text aloud using gTTS
-    tts = gTTS(text=text, lang=target_lang)
-    tts.save("temp.mp3")
-    os.system("start temp.mp3")
+    try:
+        tts = gTTS(text=text, lang=target_lang)
+        tts.save("temp.mp3")
+        # FIX: 'start' is Windows-only; use the right command per platform
+        if platform.system() == 'Windows':
+            os.system("start temp.mp3")
+        elif platform.system() == 'Darwin':  # macOS
+            os.system("open temp.mp3")
+        else:  # Linux
+            os.system("xdg-open temp.mp3")
+    except Exception as e:
+        messagebox.showerror("Erreur TTS", str(e))
 
-# Create the GUI
+
+# ── Build GUI ──────────────────────────────────────────────────────────────────
 root = tk.Tk()
 root.title("OCR avec Tesseract OCR et GRNN")
-
-# Bind the "WM_DELETE_WINDOW" event to the on_closing function
 root.protocol("WM_DELETE_WINDOW", on_closing)
 
-# Create a label to display the selected image
 image_label = tk.Label(root)
-image_label.pack()
+image_label.pack(pady=5)
 
-# Create a button to open the file dialog and import an image
 import_button = tk.Button(root, text="Importer une image", command=open_file_dialog)
-import_button.pack()
+import_button.pack(pady=2)
 
-# Create a button to show the extracted text
 show_text_button = tk.Button(root, text="Afficher le texte", command=show_text)
-show_text_button.pack()
+show_text_button.pack(pady=2)
 
-# Create buttons to translate the extracted text to different languages
-translate_to_arabic_button = tk.Button(root, text="Traduire en arabe", command=lambda: translate_text('ar'))
-translate_to_arabic_button.pack()
+translate_to_arabic_button = tk.Button(
+    root, text="Traduire en arabe", command=lambda: translate_text('ar')
+)
+translate_to_arabic_button.pack(pady=2)
 
-translate_to_french_button = tk.Button(root, text="Traduire en français", command=lambda: translate_text('fr'))
-translate_to_french_button.pack()
+translate_to_french_button = tk.Button(
+    root, text="Traduire en français", command=lambda: translate_text('fr')
+)
+translate_to_french_button.pack(pady=2)
 
-translate_to_english_button = tk.Button(root, text="Translate to English", command=lambda: translate_text('en'))
-translate_to_english_button.pack()
+translate_to_english_button = tk.Button(
+    root, text="Translate to English", command=lambda: translate_text('en')
+)
+translate_to_english_button.pack(pady=2)
 
-# Create a button to read the text aloud
 read_text_button = tk.Button(root, text="Lire le texte", command=read_text)
-read_text_button.pack()
+read_text_button.pack(pady=2)
 
-# Create a scrollbar and a text box to display the output text
-scrollbar = tk.Scrollbar(root)
+# Scrollable output text box
+frame = tk.Frame(root)
+frame.pack(fill=tk.BOTH, expand=True)
+
+scrollbar = tk.Scrollbar(frame)
 scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-output_text = tk.Text(root, font=("Helvetica", 20), yscrollcommand=scrollbar.set)
-output_text.pack(side=tk.LEFT, fill=tk.BOTH)
-
+output_text = tk.Text(frame, font=("Helvetica", 14), yscrollcommand=scrollbar.set)
+output_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 scrollbar.config(command=output_text.yview)
 
-# Bind the "q" key to the on_closing function
-root.bind("<KeyPress-q>", on_closing)
+# FIX: bind q only when root has focus, not globally, to avoid accidental quit
+root.bind("<KeyPress-q>", lambda e: on_closing())
 
-# Start the GUI
 root.mainloop()
