@@ -1,4 +1,4 @@
-# 🖼️ Multilingual OCR with GRNN Digit Recognition
+# 🖼️ Multilingual OCR with GRNN digit recognition
 
 [![Python](https://img.shields.io/badge/Python-3.7%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-1.9%2B-red?style=flat-square&logo=pytorch)](https://pytorch.org/)
@@ -8,7 +8,7 @@
 
 
 
-## 🎯 What This Does
+## 🎯 What this does
 
 Extract text from images, recognize handwritten digits, translate to any language, and listen to the results.
 
